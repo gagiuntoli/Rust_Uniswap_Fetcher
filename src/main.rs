@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::{collections::VecDeque, fmt};
 
 use futures::StreamExt;
 use web3::{
@@ -110,7 +110,7 @@ pub fn u256_to_f64(amount: U256, decimals: u8) -> f64 {
 		decimal_part.as_u128() as f64 / (10u64.pow(decimals as u32)) as f64
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ParsedLog {
 	pub sender: String,
 	pub receiver: String,
@@ -119,16 +119,32 @@ pub struct ParsedLog {
 	pub amount_dai: f64,
 }
 
+impl fmt::Debug for ParsedLog {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "Parsed Log: {{\n")?;
+		write!(f, " sender: {}\n", self.sender)?;
+		write!(f, " receiver: {}\n", self.receiver)?;
+		write!(f, " direction: {}\n", self.direction)?;
+		write!(f, " amount_usdc: {:.2}\n", self.amount_usdc)?;
+		write!(f, " amount_dai: {:.2}\n", self.amount_dai)?;
+		write!(f, "}}")
+	}
+}
+
+fn address_to_string(address: H160) -> String {
+	let mut a = String::from("0x");
+	a.push_str(hex::encode(&address).as_str());
+	a
+}
+
 pub fn parse_log(log: Log) -> ParsedLog {
-	let sender = log.params[0].value.clone().into_address().unwrap().to_string();
-	let receiver = log.params[1].value.clone().into_address().unwrap().to_string();
+	let sender = address_to_string(log.params[0].value.clone().into_address().unwrap());
+	let receiver = address_to_string(log.params[1].value.clone().into_address().unwrap());
+
 	let amount_dai = log.params[2].value.clone().into_int().unwrap();
 	let amount_usdc = log.params[3].value.clone().into_int().unwrap();
 
-	let mut bytes = [0u8; 32];
-	amount_dai.to_big_endian(&mut bytes);
-	amount_usdc.to_big_endian(&mut bytes);
-
+	// check the sign of each amount looking at the last bit (true = negative, false = positive)
 	let is_amount_dai_negative = amount_dai.bit(255);
 	let is_amount_usdc_negative = amount_usdc.bit(255);
 
@@ -139,6 +155,7 @@ pub fn parse_log(log: Log) -> ParsedLog {
 	let direction =
 		if is_amount_usdc_negative { "DAI -> USDC".to_string() } else { "USDC -> DAI".to_string() };
 
+	// format the amount according to the decimals of each token
 	let amount_dai = u256_to_f64(amount_dai, 18);
 	let amount_usdc = u256_to_f64(amount_usdc, 6);
 
@@ -150,17 +167,32 @@ pub struct QueueElement {
 	pub parsed_log: Option<Vec<ParsedLog>>,
 }
 
+/// Pushes a new element (parsed logs) to the queue of events and, if the queue
+/// has already 5 elements, pushes the ones that was pushed first. The function
+/// panics if the hash of the element being popped from the queue has a changed
+/// hash (the new hash of that block number = current block number - 5 should be
+/// given).
+///
+/// # Arguments
+///
+/// * `queue` - Queue that contains at most 5 elements on it
+///
+/// * `new_elem` - New QueueElement to be pushed to the queue, this should have
+/// it corresponding hash when the event was emitted
+///
+/// * `new_block_hash_b5` - Hash of current block number - 5 fetch at the moment
+/// a new element is inserted in the queue.
 pub fn push_to_queue(
-	log_queue: &mut VecDeque<QueueElement>,
+	queue: &mut VecDeque<QueueElement>,
 	new_elem: QueueElement,
 	new_block_hash_b5: H256, // new fetched hash from block - 5
 ) -> Option<Vec<ParsedLog>> {
 	const MAX_LEN: usize = 5;
 
-	log_queue.push_back(new_elem);
+	queue.push_back(new_elem);
 
-	if log_queue.len() == MAX_LEN + 1 {
-		match log_queue.pop_front() {
+	if queue.len() == MAX_LEN + 1 {
+		match queue.pop_front() {
 			Some(QueueElement { block_hash, parsed_log }) =>
 				if block_hash == new_block_hash_b5 {
 					return parsed_log
@@ -169,7 +201,7 @@ pub fn push_to_queue(
 				},
 			_ => panic!("Never achievable point"),
 		}
-	} else if log_queue.len() > MAX_LEN + 1 {
+	} else if queue.len() > MAX_LEN + 1 {
 		panic!("Queue length of 5 elements overpassed")
 	}
 	None
@@ -190,7 +222,10 @@ mod tests {
 	}
 
 	#[test]
-	fn test_push_to_queue_saturates_in_5_elems() {
+	fn test_push_to_queue() {
+		// we test that an empty queue is properly filled and saturates in 5 elements
+		// after the 5th element new elements and correct new hashes of
+		// current block number - 5 are inserted
 		let mut queue = VecDeque::<QueueElement>::new();
 
 		let block_hashes =
@@ -234,7 +269,7 @@ mod tests {
 
 	#[test]
 	#[should_panic(expected = "Block reorganization ocurred")]
-	fn test_false_block_hash_b5() {
+	fn test_panics_if_block_reorganization_occurs() {
 		let mut queue = VecDeque::<QueueElement>::new();
 
 		let block_hashes =
