@@ -2,8 +2,9 @@ use std::collections::VecDeque;
 
 use futures::StreamExt;
 use web3::{
-	ethabi::Log,
-	types::{BlockId, BlockNumber, H256, U256, U64},
+	contract::Contract,
+	ethabi::{Log, RawLog},
+	types::{BlockId, BlockNumber, H160, H256, U256, U64},
 };
 
 #[tokio::main]
@@ -14,10 +15,9 @@ async fn main() -> Result<(), anyhow::Error> {
 
 	let web3 =
 		web3::Web3::new(web3::transports::ws::WebSocket::new(&websocket_infura_endpoint).await?);
-	let contract_address = web3::types::H160::from_slice(
-		&hex::decode("5777d92f208679db4b9778590fa3cab3ac9e2168").unwrap()[..],
-	);
-	let contract = web3::contract::Contract::from_json(
+	let contract_address =
+		H160::from_slice(&hex::decode("5777d92f208679db4b9778590fa3cab3ac9e2168").unwrap()[..]);
+	let contract = Contract::from_json(
 		web3.eth(),
 		contract_address,
 		include_bytes!("contracts/uniswap_pool_abi.json"),
@@ -44,8 +44,6 @@ async fn main() -> Result<(), anyhow::Error> {
 		let current_block_num = block.number.expect("Error getting the current block number");
 		let current_block_hash = block.hash.expect("Error getting the current block hash");
 
-		println!("Current block   = {:?} hash = {:?}", current_block_num, current_block_hash);
-
 		let block_b5 = web3
 			.eth()
 			.block(BlockId::Number(BlockNumber::Number(current_block_num - U64::from(5))))
@@ -61,12 +59,12 @@ async fn main() -> Result<(), anyhow::Error> {
 
 		assert_eq!(block_number_b5, current_block_num - U64::from(5));
 
+		println!("Current block   = {:?} hash = {:?}", current_block_num, current_block_hash);
 		println!("Block minus - 5 = {:?} hash = {:?}", block_number_b5, block_hash_b5);
 
 		let mut logs = vec![];
 		for log in swap_logs_in_block {
-			let log = swap_event
-				.parse_log(web3::ethabi::RawLog { topics: log.topics, data: log.data.0 })?;
+			let log = swap_event.parse_log(RawLog { topics: log.topics, data: log.data.0 })?;
 
 			logs.push(parse_log(log));
 		}
@@ -94,7 +92,16 @@ pub fn u256_to_f64(amount: U256, decimals: u8) -> f64 {
 	let mut amount = amount;
 
 	if u256_is_negative(amount) {
-		amount = U256::MAX - amount;
+		// We compute the 2's complement
+		let mut bytes = [0u8; 32];
+		amount.to_big_endian(&mut bytes);
+
+		for b in bytes.iter_mut() {
+			*b = !(*b);
+		}
+
+		amount = U256::from_big_endian(&bytes);
+		amount += U256::one();
 	}
 
 	let (integer_part, decimal_part) = amount.div_mod(U256::from(10u64.pow(decimals as u32)));
@@ -118,13 +125,17 @@ pub fn parse_log(log: Log) -> ParsedLog {
 	let amount_dai = log.params[2].value.clone().into_int().unwrap();
 	let amount_usdc = log.params[3].value.clone().into_int().unwrap();
 
+	let mut bytes = [0u8; 32];
+	amount_dai.to_big_endian(&mut bytes);
+	amount_usdc.to_big_endian(&mut bytes);
+
 	let is_amount_dai_negative = amount_dai.bit(255);
 	let is_amount_usdc_negative = amount_usdc.bit(255);
 
 	// one should be false and the other true
 	assert!(is_amount_dai_negative ^ is_amount_usdc_negative);
 
-	// let direction = if is_amount0_negative { "DAI -> USDC" } else { "USDC -> DAI" };
+	// the negative one is the swap's output
 	let direction =
 		if is_amount_usdc_negative { "DAI -> USDC".to_string() } else { "USDC -> DAI".to_string() };
 
