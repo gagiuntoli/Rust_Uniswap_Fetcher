@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use futures::StreamExt;
 use web3::{
 	ethabi::Log,
-	types::{H256, U256},
+	types::{BlockId, BlockNumber, H256, U256, U64},
 };
 
 #[tokio::main]
@@ -27,6 +27,8 @@ async fn main() -> Result<(), anyhow::Error> {
 
 	let mut block_stream = web3.eth_subscribe().subscribe_new_heads().await?;
 
+	let mut queue = VecDeque::<QueueElement>::new();
+
 	while let Some(Ok(block)) = block_stream.next().await {
 		let swap_logs_in_block = web3
 			.eth()
@@ -39,22 +41,56 @@ async fn main() -> Result<(), anyhow::Error> {
 			)
 			.await?;
 
+		let current_block_num = block.number.expect("Error getting the current block number");
+		let current_block_hash = block.hash.expect("Error getting the current block hash");
+
+		println!("Current block   = {:?} hash = {:?}", current_block_num, current_block_hash);
+
+		let block_b5 = web3
+			.eth()
+			.block(BlockId::Number(BlockNumber::Number(current_block_num - U64::from(5))))
+			.await
+			.unwrap()
+			.unwrap();
+
+		let block_number_b5 =
+			block_b5.number.expect("Error getting the block number = current - 5");
+
+		let block_hash_b5 =
+			block_b5.hash.expect("Error getting the hash of block number = current - 5");
+
+		assert_eq!(block_number_b5, current_block_num - U64::from(5));
+
+		println!("Block minus - 5 = {:?} hash = {:?}", block_number_b5, block_hash_b5);
+
+		let mut logs = vec![];
 		for log in swap_logs_in_block {
 			let log = swap_event
 				.parse_log(web3::ethabi::RawLog { topics: log.topics, data: log.data.0 })?;
 
-			println!("{:#?}", parse_log(log));
+			logs.push(parse_log(log));
+		}
+
+		let elem = match logs.len() {
+			0 => QueueElement { block_hash: current_block_hash, parsed_log: None },
+			_ => QueueElement { block_hash: current_block_hash, parsed_log: Some(logs) },
+		};
+
+		let candidate = push_to_queue(&mut queue, elem, block_hash_b5);
+		if let Some(printable) = candidate {
+			println!("Logs from block {:?}", block_number_b5);
+			println!("{:#?}", printable);
 		}
 	}
 
 	Ok(())
 }
 
-fn u256_is_negative(amount: U256) -> bool {
+pub fn u256_is_negative(amount: U256) -> bool {
 	amount.bit(255)
 }
 
-fn u256_to_f64(amount: U256, decimals: u8) -> f64 {
+pub fn u256_to_f64(amount: U256, decimals: u8) -> f64 {
 	let mut amount = amount;
 
 	if u256_is_negative(amount) {
@@ -76,7 +112,7 @@ pub struct ParsedLog {
 	pub amount_dai: f64,
 }
 
-fn parse_log(log: Log) -> ParsedLog {
+pub fn parse_log(log: Log) -> ParsedLog {
 	let sender = log.params[0].value.clone().into_address().unwrap().to_string();
 	let receiver = log.params[1].value.clone().into_address().unwrap().to_string();
 	let amount_dai = log.params[2].value.clone().into_int().unwrap();
@@ -100,19 +136,19 @@ fn parse_log(log: Log) -> ParsedLog {
 
 pub struct QueueElement {
 	pub block_hash: H256,
-	pub parsed_log: Option<ParsedLog>,
+	pub parsed_log: Option<Vec<ParsedLog>>,
 }
 
 pub fn push_to_queue(
 	log_queue: &mut VecDeque<QueueElement>,
 	new_elem: QueueElement,
 	new_block_hash_b5: H256, // new fetched hash from block - 5
-) -> Option<ParsedLog> {
+) -> Option<Vec<ParsedLog>> {
 	const MAX_LEN: usize = 5;
 
 	log_queue.push_back(new_elem);
 
-	if log_queue.len() > MAX_LEN {
+	if log_queue.len() == MAX_LEN + 1 {
 		match log_queue.pop_front() {
 			Some(QueueElement { block_hash, parsed_log }) =>
 				if block_hash == new_block_hash_b5 {
@@ -120,8 +156,10 @@ pub fn push_to_queue(
 				} else {
 					panic!("Block reorganization ocurred")
 				},
-			_ => panic!("The queue should had 5 elements. Stopping program."),
+			_ => panic!("Never achievable point"),
 		}
+	} else if log_queue.len() > MAX_LEN + 1 {
+		panic!("Queue length of 5 elements overpassed")
 	}
 	None
 }
@@ -211,6 +249,23 @@ mod tests {
 		}
 
 		assert_eq!(queue.len(), 5);
+
+		let _next = push_to_queue(
+			&mut queue,
+			QueueElement { block_hash: H256::random(), parsed_log: None },
+			H256::random(),
+		);
+	}
+
+	#[test]
+	#[should_panic(expected = "Queue length of 5 elements overpassed")]
+	fn test_panics_if_queue_is_larger_than_5() {
+		let mut queue = VecDeque::<QueueElement>::new();
+		for _i in 0..=5 {
+			queue.push_back(QueueElement { block_hash: H256::random(), parsed_log: None })
+		}
+
+		assert_eq!(queue.len(), 6);
 
 		let _next = push_to_queue(
 			&mut queue,
