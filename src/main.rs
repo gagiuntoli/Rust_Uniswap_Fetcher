@@ -103,11 +103,11 @@ pub struct QueueElement {
 	pub parsed_log: Option<ParsedLog>,
 }
 
-fn push_to_queue(
+pub fn push_to_queue(
 	log_queue: &mut VecDeque<QueueElement>,
 	new_elem: QueueElement,
 	new_block_hash_b5: H256, // new fetched hash from block - 5
-) -> Result<Option<ParsedLog>, anyhow::Error> {
+) -> Option<ParsedLog> {
 	const MAX_LEN: usize = 5;
 
 	log_queue.push_back(new_elem);
@@ -116,20 +116,18 @@ fn push_to_queue(
 		match log_queue.pop_front() {
 			Some(QueueElement { block_hash, parsed_log }) =>
 				if block_hash == new_block_hash_b5 {
-					return Ok(parsed_log)
+					return parsed_log
 				} else {
-					return Err(anyhow::anyhow!("Block reorganization ocurred"))
+					panic!("Block reorganization ocurred")
 				},
-			_ => panic!("The queue should had 5 elements."),
+			_ => panic!("The queue should had 5 elements. Stopping program."),
 		}
 	}
-	Ok(None)
+	None
 }
 
 #[cfg(test)]
 mod tests {
-	use web3::block_on;
-
 	// Note this useful idiom: importing names from outer (for mod tests) scope.
 	use super::*;
 
@@ -146,28 +144,21 @@ mod tests {
 	fn test_push_to_queue_saturates_in_5_elems() {
 		let mut queue = VecDeque::<QueueElement>::new();
 
-		let block_hashes = vec![
-			H256::random(),
-			H256::random(),
-			H256::random(),
-			H256::random(),
-			H256::random(),
-			H256::random(),
-		];
-
-		let new_block_hash_b5 = H256::random();
+		let block_hashes =
+			vec![H256::random(), H256::random(), H256::random(), H256::random(), H256::random()];
 
 		for i in 0..5 {
 			assert_eq!(queue.len(), i);
 
+			// Here the queue.len() < 5 so any old b - 5 hash submitted doesn't affect the result
 			let next = push_to_queue(
 				&mut queue,
 				QueueElement { block_hash: block_hashes[i], parsed_log: None },
-				new_block_hash_b5,
+				H256::random(),
 			);
 
 			match next {
-				Ok(None) => (),
+				None => (),
 				_ => assert!(false),
 			}
 
@@ -184,11 +175,47 @@ mod tests {
 			);
 
 			match next {
-				Ok(None) => (),
+				None => (),
 				_ => assert!(false),
 			}
 
 			assert_eq!(queue.len(), 5);
 		}
+	}
+
+	#[test]
+	#[should_panic(expected = "Block reorganization ocurred")]
+	fn test_false_block_hash_b5() {
+		let mut queue = VecDeque::<QueueElement>::new();
+
+		let block_hashes =
+			vec![H256::random(), H256::random(), H256::random(), H256::random(), H256::random()];
+
+		let new_block_hash_b5 = H256::random();
+
+		for i in 0..5 {
+			assert_eq!(queue.len(), i);
+
+			let next = push_to_queue(
+				&mut queue,
+				QueueElement { block_hash: block_hashes[i], parsed_log: None },
+				new_block_hash_b5,
+			);
+
+			match next {
+				None => (),
+				_ => assert!(false),
+			}
+
+			assert_eq!(queue.len(), i + 1);
+		}
+
+		assert_eq!(queue.len(), 5);
+
+		let _next = push_to_queue(
+			&mut queue,
+			QueueElement { block_hash: H256::random(), parsed_log: None },
+			H256::random(),
+		);
 	}
 }
