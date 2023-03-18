@@ -11,14 +11,14 @@ use web3::{
 
 const BLOCK_REORG_MAX_DEPTH: usize = 5;
 
-#[derive(Debug, Clone)]
+#[derive(PartialEq, Debug, Clone)]
 pub struct Block {
 	pub number: U64,
 	pub hash: H256,
 	pub parsed_logs: Vec<ParsedLog>,
 }
 
-#[derive(Clone)]
+#[derive(PartialEq, Clone)]
 pub struct ParsedLog {
 	pub sender: String,
 	pub receiver: String,
@@ -99,14 +99,15 @@ async fn main() -> Result<(), anyhow::Error> {
 		queue.push_back(new_queue[new_queue.len() - 1].clone());
 
 		assert_eq!(
-			new_queue.len(),
-			BLOCK_REORG_MAX_DEPTH,
-			"`new_queue` should have length 5 all the time"
-		);
-		assert_eq!(
 			queue.len(),
 			BLOCK_REORG_MAX_DEPTH,
 			"`queue` should have length {} at this point.",
+			BLOCK_REORG_MAX_DEPTH
+		);
+		assert_eq!(
+			new_queue.len(),
+			BLOCK_REORG_MAX_DEPTH,
+			"`new_queue` should have length {} at this point.",
 			BLOCK_REORG_MAX_DEPTH
 		);
 
@@ -238,19 +239,29 @@ pub fn parse_log(log: Log) -> ParsedLog {
 	ParsedLog { sender, receiver, direction, amount_usdc, amount_dai }
 }
 
-/// This function updates the queue using a new queue. In case there was a
-/// depth-5 block reorganization, the function panics.
+/// This function updates the main queue using a new queue fetch 1 block ahead of time.
+/// For example: `queue` has information of blocks 1,2,3,4,5 fetched in the
+/// moment block 5 was detected. Then `new_queue` has the information of the
+/// same blocks (1,2,3,4,5) but fetched at block 6.
 pub fn check_and_update_queue(queue: &mut VecDeque<Block>, new_queue: &VecDeque<Block>) -> u32 {
+	assert_eq!(
+		queue.len(),
+		new_queue.len(),
+		"The 2 queues should have the same length to be compared."
+	);
+	assert_eq!(
+		queue[0].number, new_queue[0].number,
+		"Block number of front element in both queues doesn't coincide"
+	);
 	if queue[0].hash != new_queue[0].hash {
-		panic!("A {}-blocks reorganization ocurred", BLOCK_REORG_MAX_DEPTH);
+		println!("queue: {:#?}", queue);
+		println!("new_queue: {:#?}", new_queue);
+		panic!("A {}-blocks reorganization ocurred", queue.len());
 	}
 
 	let mut reorganizations = 0;
 	for (i, q) in queue.iter_mut().enumerate().rev() {
-		assert_eq!(
-			q.number, new_queue[i].number,
-			"block numbers should be the same for checking if there was block reorganization"
-		);
+		assert_eq!(q.number, new_queue[i].number, "Block numbers on both queues doesn't coincide.");
 
 		if q.hash == new_queue[i].hash {
 			break
@@ -319,5 +330,114 @@ mod tests {
 
 		let reorganizations = check_and_update_queue(&mut queue, &new_queue);
 		assert_eq!(reorganizations, 4)
+	}
+
+	#[test]
+	fn test_check_and_update_queue_block_reorganization_2_blocks() {
+		let hash_1 = H256::random();
+
+		let mut queue = VecDeque::<Block>::from(vec![
+			Block { hash: hash_1, number: U64::from(1u32), parsed_logs: vec![] },
+			Block { hash: H256::random(), number: U64::from(2u32), parsed_logs: vec![] },
+			Block { hash: H256::random(), number: U64::from(3u32), parsed_logs: vec![] },
+		]);
+
+		let new_queue = VecDeque::<Block>::from(vec![
+			Block { hash: hash_1, number: U64::from(1u32), parsed_logs: vec![] },
+			Block { hash: H256::random(), number: U64::from(2u32), parsed_logs: vec![] },
+			Block { hash: H256::random(), number: U64::from(3u32), parsed_logs: vec![] },
+		]);
+
+		let reorganizations = check_and_update_queue(&mut queue, &new_queue);
+		assert_eq!(reorganizations, 2)
+	}
+
+	#[test]
+	#[should_panic(expected = "Block numbers on both queues doesn't coincide.")]
+	fn test_check_and_update_queue_wrong_numbering() {
+		let hash_1 = H256::random();
+		let hash_2 = H256::random();
+
+		let mut queue = VecDeque::<Block>::from(vec![
+			Block { hash: hash_1, number: U64::from(1u32), parsed_logs: vec![] },
+			Block { hash: hash_2, number: U64::from(2u32), parsed_logs: vec![] },
+		]);
+
+		let new_queue = VecDeque::<Block>::from(vec![
+			Block { hash: hash_1, number: U64::from(1u32), parsed_logs: vec![] },
+			Block { hash: hash_2, number: U64::from(3u32), parsed_logs: vec![] },
+		]);
+
+		let _reorganizations = check_and_update_queue(&mut queue, &new_queue);
+	}
+
+	#[test]
+	#[should_panic(expected = "Block number of front element in both queues doesn't coincide")]
+	fn test_check_and_update_queue_wrong_numbering_first_element() {
+		let hash_1 = H256::random();
+		let hash_2 = H256::random();
+
+		let mut queue = VecDeque::<Block>::from(vec![
+			Block { hash: hash_1, number: U64::from(1u32), parsed_logs: vec![] },
+			Block { hash: hash_2, number: U64::from(2u32), parsed_logs: vec![] },
+		]);
+
+		let new_queue = VecDeque::<Block>::from(vec![
+			Block { hash: hash_1, number: U64::from(2u32), parsed_logs: vec![] },
+			Block { hash: hash_2, number: U64::from(2u32), parsed_logs: vec![] },
+		]);
+
+		let _reorganizations = check_and_update_queue(&mut queue, &new_queue);
+	}
+
+	#[test]
+	fn test_check_and_update_queue_effectivelly_replaces_log() {
+		let hash_1 = H256::random();
+
+		let mut queue = VecDeque::<Block>::from(vec![
+			Block { hash: hash_1, number: U64::from(1u32), parsed_logs: vec![] },
+			Block { hash: H256::random(), number: U64::from(2u32), parsed_logs: vec![] },
+		]);
+
+		let parsed_logs = vec![ParsedLog {
+			sender: "0xuser".to_string(),
+			receiver: "0xreceiver".to_string(),
+			direction: "DAI -> USDC".to_string(),
+			amount_usdc: 1929.3939,
+			amount_dai: 21921.20,
+		}];
+
+		let new_queue = VecDeque::<Block>::from(vec![
+			Block { hash: hash_1, number: U64::from(1u32), parsed_logs: vec![] },
+			Block {
+				hash: H256::random(),
+				number: U64::from(2u32),
+				parsed_logs: parsed_logs.clone(),
+			},
+		]);
+
+		let _reorganizations = check_and_update_queue(&mut queue, &new_queue);
+
+		assert_eq!(&queue[1].parsed_logs[..], &parsed_logs[..]);
+	}
+
+	#[test]
+	#[should_panic(expected = "The 2 queues should have the same length to be compared.")]
+	fn test_check_and_update_queue_different_queue_sizes() {
+		let hash_1 = H256::random();
+		let hash_2 = H256::random();
+
+		let mut queue = VecDeque::<Block>::from(vec![
+			Block { hash: hash_1, number: U64::from(1u32), parsed_logs: vec![] },
+			Block { hash: hash_2, number: U64::from(2u32), parsed_logs: vec![] },
+		]);
+
+		let new_queue = VecDeque::<Block>::from(vec![Block {
+			hash: hash_1,
+			number: U64::from(1u32),
+			parsed_logs: vec![],
+		}]);
+
+		let _reorganizations = check_and_update_queue(&mut queue, &new_queue);
 	}
 }
