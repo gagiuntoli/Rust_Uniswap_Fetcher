@@ -11,6 +11,34 @@ use web3::{
 
 const BLOCK_REORG_MAX_DEPTH: usize = 5;
 
+#[derive(Debug, Clone)]
+pub struct Block {
+	pub number: U64,
+	pub hash: H256,
+	pub parsed_logs: Vec<ParsedLog>,
+}
+
+#[derive(Clone)]
+pub struct ParsedLog {
+	pub sender: String,
+	pub receiver: String,
+	pub direction: String,
+	pub amount_usdc: f64,
+	pub amount_dai: f64,
+}
+
+impl fmt::Debug for ParsedLog {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "Parsed Log: {{\n")?;
+		write!(f, " sender: {}\n", self.sender)?;
+		write!(f, " receiver: {}\n", self.receiver)?;
+		write!(f, " direction: {}\n", self.direction)?;
+		write!(f, " amount_usdc: {:.2}\n", self.amount_usdc)?;
+		write!(f, " amount_dai: {:.2}\n", self.amount_dai)?;
+		write!(f, "}}")
+	}
+}
+
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
 	dotenv::dotenv().ok();
@@ -56,7 +84,7 @@ async fn main() -> Result<(), anyhow::Error> {
 	while let Some(Ok(block)) = block_stream.next().await {
 		let current_block_num = block.number.expect("Error getting the current block number");
 
-		let mut block_numbers = queue.iter().map(|block| block.block_number).collect::<Vec<U64>>();
+		let mut block_numbers = queue.iter().map(|block| block.number).collect::<Vec<U64>>();
 		block_numbers.push(current_block_num);
 
 		let new_queue = fetch_block_queue(
@@ -86,9 +114,9 @@ async fn main() -> Result<(), anyhow::Error> {
 
 		let block = queue.pop_front().expect("fail in popping element from the queue");
 
-		println!("block: {} reorgs: {}", block.block_number, reorganizations);
-		if let Some(logs) = block.parsed_log {
-			println!("{:#?}", logs);
+		println!("block: {} reorgs: {}", block.number, reorganizations);
+		if block.parsed_logs.len() > 0 {
+			println!("{:#?}", block.parsed_logs);
 		}
 
 		assert_eq!(
@@ -131,12 +159,12 @@ pub async fn fetch_block_queue(
 			.await
 			.unwrap();
 
-		let mut logs = vec![];
+		let mut parsed_logs = vec![];
 		for log in swap_logs_in_block {
 			let log =
 				swap_event.parse_log(RawLog { topics: log.topics, data: log.data.0 }).unwrap();
 
-			logs.push(parse_log(log));
+			parsed_logs.push(parse_log(log));
 		}
 
 		assert_eq!(
@@ -145,15 +173,10 @@ pub async fn fetch_block_queue(
 			"block_i should equal `number` field of block fetched"
 		);
 
-		let block_hash = block.hash.expect("could not get block number");
-		let block_number = block_i;
+		let hash = block.hash.expect("could not get block number");
+		let number = block_i;
 
-		let elem = match logs.len() {
-			0 => Block { block_hash, block_number, parsed_log: None },
-			_ => Block { block_hash, block_number, parsed_log: Some(logs) },
-		};
-
-		queue.push_back(elem);
+		queue.push_back(Block { hash, number, parsed_logs });
 	}
 	queue
 }
@@ -182,27 +205,6 @@ pub fn u256_to_f64(amount: U256, decimals: u8) -> f64 {
 
 	integer_part.as_u128() as f64 +
 		decimal_part.as_u128() as f64 / (10u64.pow(decimals as u32)) as f64
-}
-
-#[derive(Clone)]
-pub struct ParsedLog {
-	pub sender: String,
-	pub receiver: String,
-	pub direction: String,
-	pub amount_usdc: f64,
-	pub amount_dai: f64,
-}
-
-impl fmt::Debug for ParsedLog {
-	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		write!(f, "Parsed Log: {{\n")?;
-		write!(f, " sender: {}\n", self.sender)?;
-		write!(f, " receiver: {}\n", self.receiver)?;
-		write!(f, " direction: {}\n", self.direction)?;
-		write!(f, " amount_usdc: {:.2}\n", self.amount_usdc)?;
-		write!(f, " amount_dai: {:.2}\n", self.amount_dai)?;
-		write!(f, "}}")
-	}
 }
 
 fn address_to_string(address: H160) -> String {
@@ -236,27 +238,25 @@ pub fn parse_log(log: Log) -> ParsedLog {
 	ParsedLog { sender, receiver, direction, amount_usdc, amount_dai }
 }
 
-/// TODO: This might be called `Block` or similar
-#[derive(Debug, Clone)]
-pub struct Block {
-	pub block_number: U64,
-	pub block_hash: H256,
-	pub parsed_log: Option<Vec<ParsedLog>>,
-}
-
 /// This function updates the queue using a new queue. In case there was a
 /// depth-5 block reorganization, the function panics.
 pub fn check_and_update_queue(queue: &mut VecDeque<Block>, new_queue: &VecDeque<Block>) -> u32 {
-	if queue[0].block_hash != new_queue[0].block_hash {
-		panic!("Block reorganization ocurred");
+	if queue[0].hash != new_queue[0].hash {
+		panic!("A {}-blocks reorganization ocurred", BLOCK_REORG_MAX_DEPTH);
 	}
 
 	let mut reorganizations = 0;
 	for (i, q) in queue.iter_mut().enumerate().rev() {
-		if q.block_hash == new_queue[i].block_hash {
+		assert_eq!(
+			q.number, new_queue[i].number,
+			"block numbers should be the same for checking if there was block reorganization"
+		);
+
+		if q.hash == new_queue[i].hash {
 			break
 		}
 		*q = new_queue[i].clone();
+
 		reorganizations += 1;
 	}
 	reorganizations
@@ -279,23 +279,19 @@ mod tests {
 	#[test]
 	fn test_check_and_update_queue_ok() {
 		let mut queue = VecDeque::<Block>::from(vec![
-			Block { block_hash: H256::random(), block_number: U64::from(1u32), parsed_log: None },
-			Block { block_hash: H256::random(), block_number: U64::from(2u32), parsed_log: None },
-			Block { block_hash: H256::random(), block_number: U64::from(3u32), parsed_log: None },
-			Block { block_hash: H256::random(), block_number: U64::from(4u32), parsed_log: None },
-			Block { block_hash: H256::random(), block_number: U64::from(5u32), parsed_log: None },
+			Block { hash: H256::random(), number: U64::from(1u32), parsed_logs: vec![] },
+			Block { hash: H256::random(), number: U64::from(2u32), parsed_logs: vec![] },
+			Block { hash: H256::random(), number: U64::from(3u32), parsed_logs: vec![] },
+			Block { hash: H256::random(), number: U64::from(4u32), parsed_logs: vec![] },
+			Block { hash: H256::random(), number: U64::from(5u32), parsed_logs: vec![] },
 		]);
 
 		let new_queue = VecDeque::<Block>::from(vec![
-			Block {
-				block_hash: queue[0].block_hash,
-				block_number: U64::from(1u32),
-				parsed_log: None,
-			},
-			Block { block_hash: H256::random(), block_number: U64::from(2u32), parsed_log: None },
-			Block { block_hash: H256::random(), block_number: U64::from(3u32), parsed_log: None },
-			Block { block_hash: H256::random(), block_number: U64::from(4u32), parsed_log: None },
-			Block { block_hash: H256::random(), block_number: U64::from(5u32), parsed_log: None },
+			Block { hash: queue[0].hash, number: U64::from(1u32), parsed_logs: vec![] },
+			Block { hash: H256::random(), number: U64::from(2u32), parsed_logs: vec![] },
+			Block { hash: H256::random(), number: U64::from(3u32), parsed_logs: vec![] },
+			Block { hash: H256::random(), number: U64::from(4u32), parsed_logs: vec![] },
+			Block { hash: H256::random(), number: U64::from(5u32), parsed_logs: vec![] },
 		]);
 
 		let reorganizations = check_and_update_queue(&mut queue, &new_queue);
@@ -303,22 +299,22 @@ mod tests {
 	}
 
 	#[test]
-	#[should_panic(expected = "Block reorganization ocurred")]
+	#[should_panic(expected = "A 5-blocks reorganization ocurred")]
 	fn test_check_and_update_queue_block_reorganization_5() {
 		let mut queue = VecDeque::<Block>::from(vec![
-			Block { block_hash: H256::random(), block_number: U64::from(5u32), parsed_log: None },
-			Block { block_hash: H256::random(), block_number: U64::from(4u32), parsed_log: None },
-			Block { block_hash: H256::random(), block_number: U64::from(3u32), parsed_log: None },
-			Block { block_hash: H256::random(), block_number: U64::from(2u32), parsed_log: None },
-			Block { block_hash: H256::random(), block_number: U64::from(1u32), parsed_log: None },
+			Block { hash: H256::random(), number: U64::from(5u32), parsed_logs: vec![] },
+			Block { hash: H256::random(), number: U64::from(4u32), parsed_logs: vec![] },
+			Block { hash: H256::random(), number: U64::from(3u32), parsed_logs: vec![] },
+			Block { hash: H256::random(), number: U64::from(2u32), parsed_logs: vec![] },
+			Block { hash: H256::random(), number: U64::from(1u32), parsed_logs: vec![] },
 		]);
 
 		let new_queue = VecDeque::<Block>::from(vec![
-			Block { block_hash: H256::random(), block_number: U64::from(5u32), parsed_log: None },
-			Block { block_hash: H256::random(), block_number: U64::from(4u32), parsed_log: None },
-			Block { block_hash: H256::random(), block_number: U64::from(3u32), parsed_log: None },
-			Block { block_hash: H256::random(), block_number: U64::from(2u32), parsed_log: None },
-			Block { block_hash: H256::random(), block_number: U64::from(1u32), parsed_log: None },
+			Block { hash: H256::random(), number: U64::from(5u32), parsed_logs: vec![] },
+			Block { hash: H256::random(), number: U64::from(4u32), parsed_logs: vec![] },
+			Block { hash: H256::random(), number: U64::from(3u32), parsed_logs: vec![] },
+			Block { hash: H256::random(), number: U64::from(2u32), parsed_logs: vec![] },
+			Block { hash: H256::random(), number: U64::from(1u32), parsed_logs: vec![] },
 		]);
 
 		let reorganizations = check_and_update_queue(&mut queue, &new_queue);
