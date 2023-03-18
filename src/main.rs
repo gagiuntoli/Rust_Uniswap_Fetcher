@@ -3,9 +3,13 @@ use std::{collections::VecDeque, fmt};
 use futures::StreamExt;
 use web3::{
 	contract::Contract,
-	ethabi::{Log, RawLog},
+	ethabi::{Event, Log, RawLog},
+	transports::WebSocket,
 	types::{BlockId, BlockNumber, H160, H256, U256, U64},
+	Web3,
 };
+
+const BLOCK_REORG_MAX_DEPTH: usize = 5;
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
@@ -31,6 +35,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
 	while let Some(Ok(block)) = block_stream.next().await {
 		let swap_logs_in_block = web3
+			.clone()
 			.eth()
 			.logs(
 				web3::types::FilterBuilder::default()
@@ -42,6 +47,15 @@ async fn main() -> Result<(), anyhow::Error> {
 			.await?;
 
 		let current_block_num = block.number.expect("Error getting the current block number");
+
+		let mut new_queue = fetch_block_queue(
+			current_block_num,
+			web3.clone(),
+			contract_address,
+			swap_event_signature,
+			swap_event.clone(),
+		);
+
 		let current_block_hash = block.hash.expect("Error getting the current block hash");
 
 		let block_b5 = web3
@@ -82,6 +96,53 @@ async fn main() -> Result<(), anyhow::Error> {
 	}
 
 	Ok(())
+}
+
+pub async fn fetch_block_queue(
+	from_block: U64,
+	web3: Web3<WebSocket>,
+	contract_address: H160,
+	swap_event_signature: H256,
+	swap_event: Event,
+) -> VecDeque<QueueElement> {
+	let mut queue = VecDeque::<QueueElement>::new();
+
+	for i in 0..BLOCK_REORG_MAX_DEPTH {
+		let block_i = web3
+			.eth()
+			.block(BlockId::Number(BlockNumber::Number(from_block - U64::from(i))))
+			.await
+			.unwrap()
+			.unwrap();
+
+		let swap_logs_in_block = web3
+			.eth()
+			.logs(
+				web3::types::FilterBuilder::default()
+					.block_hash(block_i.hash.unwrap())
+					.address(vec![contract_address])
+					.topics(Some(vec![swap_event_signature]), None, None, None)
+					.build(),
+			)
+			.await
+			.unwrap();
+
+		let mut logs = vec![];
+		for log in swap_logs_in_block {
+			let log =
+				swap_event.parse_log(RawLog { topics: log.topics, data: log.data.0 }).unwrap();
+
+			logs.push(parse_log(log));
+		}
+
+		let elem = match logs.len() {
+			0 => QueueElement { block_hash: block_i.hash.unwrap(), parsed_log: None },
+			_ => QueueElement { block_hash: block_i.hash.unwrap(), parsed_log: Some(logs) },
+		};
+
+		queue.push_back(elem);
+	}
+	queue
 }
 
 pub fn u256_is_negative(amount: U256) -> bool {
@@ -162,6 +223,8 @@ pub fn parse_log(log: Log) -> ParsedLog {
 	ParsedLog { sender, receiver, direction, amount_usdc, amount_dai }
 }
 
+/// TODO: This might be called `Block` or similar
+#[derive(Debug, Clone)]
 pub struct QueueElement {
 	pub block_hash: H256,
 	pub parsed_log: Option<Vec<ParsedLog>>,
@@ -205,6 +268,27 @@ pub fn push_to_queue(
 		panic!("Queue length of 5 elements overpassed")
 	}
 	None
+}
+
+/// This function updates the queue using a new queue. In case there was a
+/// depth-5 block reorganization, the function panics.
+pub fn check_and_update_queue(
+	queue: &mut VecDeque<QueueElement>,
+	new_queue: &VecDeque<QueueElement>,
+) -> u32 {
+	if queue[0].block_hash != new_queue[0].block_hash {
+		panic!("Block reorganization ocurred");
+	}
+
+	let mut reorganizations = 0;
+	for (i, q) in queue.iter_mut().enumerate().rev() {
+		if q.block_hash == new_queue[i].block_hash {
+			break
+		}
+		*q = new_queue[i].clone();
+		reorganizations += 1;
+	}
+	reorganizations
 }
 
 #[cfg(test)]
@@ -318,5 +402,50 @@ mod tests {
 			QueueElement { block_hash: H256::random(), parsed_log: None },
 			H256::random(),
 		);
+	}
+
+	#[test]
+	fn test_check_and_update_queue_ok() {
+		let mut queue = VecDeque::<QueueElement>::from(vec![
+			QueueElement { block_hash: H256::random(), parsed_log: None },
+			QueueElement { block_hash: H256::random(), parsed_log: None },
+			QueueElement { block_hash: H256::random(), parsed_log: None },
+			QueueElement { block_hash: H256::random(), parsed_log: None },
+			QueueElement { block_hash: H256::random(), parsed_log: None },
+		]);
+
+		let new_queue = VecDeque::<QueueElement>::from(vec![
+			QueueElement { block_hash: queue[0].block_hash, parsed_log: None },
+			QueueElement { block_hash: H256::random(), parsed_log: None },
+			QueueElement { block_hash: H256::random(), parsed_log: None },
+			QueueElement { block_hash: H256::random(), parsed_log: None },
+			QueueElement { block_hash: H256::random(), parsed_log: None },
+		]);
+
+		let reorganizations = check_and_update_queue(&mut queue, &new_queue);
+		assert_eq!(reorganizations, 4)
+	}
+
+	#[test]
+	#[should_panic(expected = "Block reorganization ocurred")]
+	fn test_check_and_update_queue_block_reorganization_5() {
+		let mut queue = VecDeque::<QueueElement>::from(vec![
+			QueueElement { block_hash: H256::random(), parsed_log: None },
+			QueueElement { block_hash: H256::random(), parsed_log: None },
+			QueueElement { block_hash: H256::random(), parsed_log: None },
+			QueueElement { block_hash: H256::random(), parsed_log: None },
+			QueueElement { block_hash: H256::random(), parsed_log: None },
+		]);
+
+		let new_queue = VecDeque::<QueueElement>::from(vec![
+			QueueElement { block_hash: H256::random(), parsed_log: None },
+			QueueElement { block_hash: H256::random(), parsed_log: None },
+			QueueElement { block_hash: H256::random(), parsed_log: None },
+			QueueElement { block_hash: H256::random(), parsed_log: None },
+			QueueElement { block_hash: H256::random(), parsed_log: None },
+		]);
+
+		let reorganizations = check_and_update_queue(&mut queue, &new_queue);
+		assert_eq!(reorganizations, 4)
 	}
 }
