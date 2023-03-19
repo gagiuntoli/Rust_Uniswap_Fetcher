@@ -9,8 +9,6 @@ use web3::{
 	Web3,
 };
 
-const BLOCK_REORG_MAX_DEPTH: usize = 5;
-
 #[derive(PartialEq, Debug, Clone)]
 pub struct Block {
 	pub number: U64,
@@ -43,6 +41,7 @@ impl fmt::Debug for ParsedLog {
 async fn main() -> Result<(), anyhow::Error> {
 	dotenv::dotenv().ok();
 
+	const BLOCK_REORG_MAX_DEPTH: usize = 5;
 	assert!(BLOCK_REORG_MAX_DEPTH > 0, "BLOCK_REORG_MAX_DEPTH should be set larger than 0");
 
 	let websocket_infura_endpoint: String = std::env::var("INFURA_WSS_ENDPOINT")?;
@@ -255,10 +254,10 @@ pub fn parse_log(log: Log) -> ParsedLog {
 	ParsedLog { sender, receiver, direction, amount_usdc, amount_dai }
 }
 
-/// This function updates the main queue using a new queue fetch 1 block ahead of time.
-/// For example: `queue` has information of blocks 1,2,3,4,5 fetched in the
-/// moment block 5 was detected. Then `new_queue` has the information of the
-/// same blocks (1,2,3,4,5) but fetched at block 6.
+/// This function updates the main queue using a new queue fetched some blocks ahead of time.
+/// Normally the new block is constructed 1 block ahead of time. For example: `queue` has
+/// information of blocks 1,2,3,4,5 fetched at the moment block 5 was detected. Then, `new_queue`
+/// has the information of the same blocks (1,2,3,4,5) but fetched at block 6 or after.
 pub fn check_and_update_queue(queue: &mut VecDeque<Block>, new_queue: &VecDeque<Block>) -> u32 {
 	assert_eq!(
 		queue.len(),
