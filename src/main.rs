@@ -23,8 +23,8 @@ pub struct ParsedLog {
 	pub sender: String,
 	pub receiver: String,
 	pub direction: String,
-	pub amount_usdc: f64,
-	pub amount_dai: f64,
+	pub amount_usdc: String,
+	pub amount_dai: String,
 }
 
 impl fmt::Debug for ParsedLog {
@@ -186,7 +186,7 @@ pub fn u256_is_negative(amount: U256) -> bool {
 	amount.bit(255)
 }
 
-pub fn u256_to_f64(amount: U256, decimals: u8) -> f64 {
+pub fn u256_to_string(amount: U256, decimals: usize) -> String {
 	let mut amount = amount;
 
 	if u256_is_negative(amount) {
@@ -202,10 +202,26 @@ pub fn u256_to_f64(amount: U256, decimals: u8) -> f64 {
 		amount += U256::one();
 	}
 
-	let (integer_part, decimal_part) = amount.div_mod(U256::from(10u64.pow(decimals as u32)));
+	let decimal_string = amount.to_string();
 
-	integer_part.as_u128() as f64 +
-		decimal_part.as_u128() as f64 / (10u64.pow(decimals as u32)) as f64
+	let integer: String = match decimal_string.clone().len() > decimals {
+		true => decimal_string[..decimal_string.len() - decimals].to_string(),
+		false => "0".to_string(),
+	};
+
+	let decimals: String = match decimal_string.len() > decimals {
+		true =>
+			if decimals > 0 {
+				decimal_string[decimal_string.len() - decimals..].to_string()
+			} else {
+				"0".to_string()
+			},
+		false => {
+			format!("{}{}", "0".repeat(decimals - decimal_string.len()), &decimal_string[..])
+		},
+	};
+
+	format!("{}.{}", integer, decimals)
 }
 
 fn address_to_string(address: H160) -> String {
@@ -233,8 +249,8 @@ pub fn parse_log(log: Log) -> ParsedLog {
 		if is_amount_usdc_negative { "DAI -> USDC".to_string() } else { "USDC -> DAI".to_string() };
 
 	// format the amount according to the decimals of each token
-	let amount_dai = u256_to_f64(amount_dai, 18);
-	let amount_usdc = u256_to_f64(amount_usdc, 6);
+	let amount_dai = u256_to_string(amount_dai, 18);
+	let amount_usdc = u256_to_string(amount_usdc, 6);
 
 	ParsedLog { sender, receiver, direction, amount_usdc, amount_dai }
 }
@@ -279,12 +295,27 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn test_hex_decode() {
-		let m = U256::from(1000000000000u128);
-		assert_eq!(u256_to_f64(m, 6), 1000000f64);
+	fn test_u256_to_string() {
+		let m = U256::from_dec_str("1000000000000").unwrap();
+		assert_eq!(u256_to_string(m, 6), String::from("1000000.000000"));
 
-		let m = U256::from(1000000000001u128);
-		assert_eq!(u256_to_f64(m, 6), 1000000.000001f64);
+		let m = U256::from_dec_str("1000000000001").unwrap();
+		assert_eq!(u256_to_string(m, 6), String::from("1000000.000001"));
+
+		let m = U256::from_dec_str("1000000000001").unwrap();
+		assert_eq!(u256_to_string(m, 6), String::from("1000000.000001"));
+
+		let m = U256::from_dec_str("1000000000001").unwrap();
+		assert_eq!(u256_to_string(m, 2), String::from("10000000000.01"));
+
+		let m = U256::from_dec_str("1000000000001").unwrap();
+		assert_eq!(u256_to_string(m, 0), String::from("1000000000001.0"));
+
+		let m = U256::from_dec_str("1000000000001").unwrap();
+		assert_eq!(u256_to_string(m, 13), String::from("0.1000000000001"));
+
+		let m = U256::from_dec_str("1000000000001").unwrap();
+		assert_eq!(u256_to_string(m, 15), String::from("0.001000000000001"));
 	}
 
 	#[test]
@@ -403,8 +434,8 @@ mod tests {
 			sender: "0xuser".to_string(),
 			receiver: "0xreceiver".to_string(),
 			direction: "DAI -> USDC".to_string(),
-			amount_usdc: 1929.3939,
-			amount_dai: 21921.20,
+			amount_usdc: "1929.3939".to_string(),
+			amount_dai: "21921.20".to_string(),
 		}];
 
 		let new_queue = VecDeque::<Block>::from(vec![
