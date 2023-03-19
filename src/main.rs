@@ -33,8 +33,8 @@ impl fmt::Debug for ParsedLog {
 		write!(f, " sender: {}\n", self.sender)?;
 		write!(f, " receiver: {}\n", self.receiver)?;
 		write!(f, " direction: {}\n", self.direction)?;
-		write!(f, " amount_usdc: {:.2}\n", self.amount_usdc)?;
-		write!(f, " amount_dai: {:.2}\n", self.amount_dai)?;
+		write!(f, " amount_usdc: {:}\n", self.amount_usdc)?;
+		write!(f, " amount_dai: {:}\n", self.amount_dai)?;
 		write!(f, "}}")
 	}
 }
