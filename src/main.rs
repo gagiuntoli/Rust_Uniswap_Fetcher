@@ -237,8 +237,8 @@ pub fn parse_log(log: Log) -> ParsedLog {
 	let amount_usdc = log.params[3].value.clone().into_int().unwrap();
 
 	// check the sign of each amount looking at the last bit (true = negative, false = positive)
-	let is_amount_dai_negative = amount_dai.bit(255);
-	let is_amount_usdc_negative = amount_usdc.bit(255);
+	let is_amount_dai_negative = u256_is_negative(amount_dai);
+	let is_amount_usdc_negative = u256_is_negative(amount_usdc);
 
 	// one should be false and the other true
 	assert!(is_amount_dai_negative ^ is_amount_usdc_negative);
